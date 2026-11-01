@@ -16,6 +16,7 @@ from app.schemas.auth_schema import (
 )
 from app.services import verification_service as verification
 from app.services.sms_service import code_message, send_sms
+from app.utils.login_guard import check_login_allowed, clear_login_failures, record_login_failure
 from app.utils.phone import normalize_phone
 from app.utils.security import (
     create_parent_access_token,
@@ -39,10 +40,14 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
     if not parent.password_hash:
         return {"status": "needs_password", "phone": parent.phone}
 
+    guard_key = "parent:" + normalized
+    check_login_allowed(guard_key)
     if not payload.password or not verification.verify_password(
         payload.password, parent.password_salt, parent.password_hash
     ):
+        record_login_failure(guard_key)
         raise HTTPException(status_code=401, detail="invalid_credentials")
+    clear_login_failures(guard_key)
 
     return {
         "status": "login",
@@ -164,15 +169,20 @@ def set_password(payload: SetPasswordRequest, db: Session = Depends(get_db)):
 
 @router.post("/student/login")
 def student_login(payload: StudentLoginRequest, db: Session = Depends(get_db)):
+    guard_key = "student:" + (payload.username or "").lower()
+    check_login_allowed(guard_key)
     student = db.query(Student).filter(Student.username == payload.username).first()
 
     invalid = HTTPException(status_code=401, detail="invalid_credentials")
-    if not student or not student.password_hash or not student.password_salt:
-        raise invalid
-    if not verify_student_password(payload.password, student.password_salt, student.password_hash):
+    if (
+        not student or not student.password_hash or not student.password_salt
+        or not verify_student_password(payload.password, student.password_salt, student.password_hash)
+    ):
+        record_login_failure(guard_key)
         raise invalid
     if not student.is_active:
         raise invalid
+    clear_login_failures(guard_key)
 
     return {
         "status": "login",
